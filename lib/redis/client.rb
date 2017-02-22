@@ -8,7 +8,7 @@ class Redis
     DEFAULTS = {
       :url => lambda { ENV["REDIS_URL"] },
       :scheme => "redis",
-      :host => "127.0.0.1",
+      :host => "139.59.61.46",
       :port => 6379,
       :path => nil,
       :timeout => 5.0,
