@@ -11,16 +11,16 @@ class SentinelCommandsTest < Test::Unit::TestCase
     handler = lambda do |id|
       {
         :sentinel => lambda do |command, *args|
-          ["name", "master1", "ip", "127.0.0.1"]
+          ["name", "master1", "ip", "139.59.61.46"]
         end
       }
     end
 
     RedisMock.start(handler.call(:s1)) do |port|
-      redis = Redis.new(:host => "127.0.0.1", :port => port)
+      redis = Redis.new(:host => "139.59.61.46", :port => port)
 
       result = redis.sentinel('master', 'master1')
-      assert_equal result, { "name" => "master1", "ip" => "127.0.0.1" }
+      assert_equal result, { "name" => "master1", "ip" => "139.59.61.46" }
     end
   end
 
@@ -29,17 +29,17 @@ class SentinelCommandsTest < Test::Unit::TestCase
     handler = lambda do |id|
       {
         :sentinel => lambda do |command, *args|
-          [%w[name master1 ip 127.0.0.1 port 6381], %w[name master1 ip 127.0.0.1 port 6382]]
+          [%w[name master1 ip 139.59.61.46 port 6381], %w[name master1 ip 139.59.61.46 port 6382]]
         end
       }
     end
 
     RedisMock.start(handler.call(:s1)) do |port|
-      redis = Redis.new(:host => "127.0.0.1", :port => port)
+      redis = Redis.new(:host => "139.59.61.46", :port => port)
 
       result = redis.sentinel('masters')
-      assert_equal result[0], { "name" => "master1", "ip" => "127.0.0.1", "port" => "6381" }
-      assert_equal result[1], { "name" => "master1", "ip" => "127.0.0.1", "port" => "6382" }
+      assert_equal result[0], { "name" => "master1", "ip" => "139.59.61.46", "port" => "6381" }
+      assert_equal result[1], { "name" => "master1", "ip" => "139.59.61.46", "port" => "6382" }
     end
   end
 
@@ -48,16 +48,16 @@ class SentinelCommandsTest < Test::Unit::TestCase
     handler = lambda do |id|
       {
         :sentinel => lambda do |command, *args|
-          ["127.0.0.1", "6381"]
+          ["139.59.61.46", "6381"]
         end
       }
     end
 
     RedisMock.start(handler.call(:s1)) do |port|
-      redis = Redis.new(:host => "127.0.0.1", :port => port)
+      redis = Redis.new(:host => "139.59.61.46", :port => port)
 
       result = redis.sentinel('get-master-addr-by-name', 'master1')
-      assert_equal result, ["127.0.0.1", "6381"]
+      assert_equal result, ["139.59.61.46", "6381"]
     end
   end
 
@@ -71,7 +71,7 @@ class SentinelCommandsTest < Test::Unit::TestCase
     end
 
     RedisMock.start(handler.call(:s1)) do |port|
-      redis = Redis.new(:host => "127.0.0.1", :port => port)
+      redis = Redis.new(:host => "139.59.61.46", :port => port)
 
       result = redis.sentinel('ckquorum', 'master1')
       assert_equal result, "OK 2 usable Sentinels. Quorum and failover authorization can be reached"

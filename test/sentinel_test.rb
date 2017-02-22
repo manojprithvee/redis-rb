@@ -7,8 +7,8 @@ class SentinelTest < Test::Unit::TestCase
   include Helper::Client
 
   def test_sentinel_connection
-    sentinels = [{:host => "127.0.0.1", :port => 26381},
-                 {:host => "127.0.0.1", :port => 26382}]
+    sentinels = [{:host => "139.59.61.46", :port => 26381},
+                 {:host => "139.59.61.46", :port => 26382}]
 
     commands = {
       :s1 => [],
@@ -19,7 +19,7 @@ class SentinelTest < Test::Unit::TestCase
       {
         :sentinel => lambda do |command, *args|
           commands[id] << [command, *args]
-          ["127.0.0.1", "6381"]
+          ["139.59.61.46", "6381"]
         end
       }
     end
@@ -39,8 +39,8 @@ class SentinelTest < Test::Unit::TestCase
   end
 
   def test_sentinel_failover
-    sentinels = [{:host => "127.0.0.1", :port => 26381},
-                 {:host => "127.0.0.1", :port => 26382}]
+    sentinels = [{:host => "139.59.61.46", :port => 26381},
+                 {:host => "139.59.61.46", :port => 26382}]
 
     commands = {
       :s1 => [],
@@ -57,7 +57,7 @@ class SentinelTest < Test::Unit::TestCase
     s2 = {
       :sentinel => lambda do |command, *args|
         commands[:s2] << [command, *args]
-        ["127.0.0.1", "6381"]
+        ["139.59.61.46", "6381"]
       end
     }
 
@@ -76,8 +76,8 @@ class SentinelTest < Test::Unit::TestCase
   end
 
   def test_sentinel_failover_prioritize_healthy_sentinel
-    sentinels = [{:host => "127.0.0.1", :port => 26381},
-                 {:host => "127.0.0.1", :port => 26382}]
+    sentinels = [{:host => "139.59.61.46", :port => 26381},
+                 {:host => "139.59.61.46", :port => 26382}]
 
     commands = {
       :s1 => [],
@@ -94,7 +94,7 @@ class SentinelTest < Test::Unit::TestCase
     s2 = {
       :sentinel => lambda do |command, *args|
         commands[:s2] << [command, *args]
-        ["127.0.0.1", "6381"]
+        ["139.59.61.46", "6381"]
       end
     }
 
@@ -117,7 +117,7 @@ class SentinelTest < Test::Unit::TestCase
   end
 
   def test_sentinel_with_non_sentinel_options
-    sentinels = [{:host => "127.0.0.1", :port => 26381}]
+    sentinels = [{:host => "139.59.61.46", :port => 26381}]
 
     commands = {
       :s1 => [],
@@ -136,7 +136,7 @@ class SentinelTest < Test::Unit::TestCase
         end,
         :sentinel => lambda do |command, *args|
           commands[:s1] << [command, *args]
-          ["127.0.0.1", port.to_s]
+          ["139.59.61.46", port.to_s]
         end
       }
     end
@@ -166,12 +166,12 @@ class SentinelTest < Test::Unit::TestCase
   end
 
   def test_sentinel_role_mismatch
-    sentinels = [{:host => "127.0.0.1", :port => 26381}]
+    sentinels = [{:host => "139.59.61.46", :port => 26381}]
 
     sentinel = lambda do |port|
       {
         :sentinel => lambda do |command, *args|
-          ["127.0.0.1", port.to_s]
+          ["139.59.61.46", port.to_s]
         end
       }
     end
@@ -197,8 +197,8 @@ class SentinelTest < Test::Unit::TestCase
   end
 
   def test_sentinel_retries
-    sentinels = [{:host => "127.0.0.1", :port => 26381},
-                 {:host => "127.0.0.1", :port => 26382}]
+    sentinels = [{:host => "139.59.61.46", :port => 26381},
+                 {:host => "139.59.61.46", :port => 26382}]
 
     connections = []
 
@@ -210,7 +210,7 @@ class SentinelTest < Test::Unit::TestCase
           if connections.count(id) < 2
             :close
           else
-            ["127.0.0.1", port.to_s]
+            ["139.59.61.46", port.to_s]
           end
         end
       }

@@ -110,8 +110,8 @@ if you want to use this feature.
 To connect using Sentinel, use:
 
 ```ruby
-SENTINELS = [{:host => "127.0.0.1", :port => 26380},
-             {:host => "127.0.0.1", :port => 26381}]
+SENTINELS = [{:host => "139.59.61.46", :port => 26380},
+             {:host => "139.59.61.46", :port => 26381}]
 
 redis = Redis.new(:url => "redis://mymaster", :sentinels => SENTINELS, :role => :master)
 ```

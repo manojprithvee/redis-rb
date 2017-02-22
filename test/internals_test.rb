@@ -45,25 +45,25 @@ class TestInternals < Test::Unit::TestCase
   end
 
   def test_provides_a_meaningful_inspect
-    assert_equal "#<Redis client v#{Redis::VERSION} for redis://127.0.0.1:#{PORT}/15>", r.inspect
+    assert_equal "#<Redis client v#{Redis::VERSION} for redis://139.59.61.46:#{PORT}/15>", r.inspect
   end
 
   def test_redis_current
-    assert_equal "127.0.0.1", Redis.current.client.host
+    assert_equal "139.59.61.46", Redis.current.client.host
     assert_equal 6379, Redis.current.client.port
     assert_equal 0, Redis.current.client.db
 
     Redis.current = Redis.new(OPTIONS.merge(:port => 6380, :db => 1))
 
     t = Thread.new do
-      assert_equal "127.0.0.1", Redis.current.client.host
+      assert_equal "139.59.61.46", Redis.current.client.host
       assert_equal 6380, Redis.current.client.port
       assert_equal 1, Redis.current.client.db
     end
 
     t.join
 
-    assert_equal "127.0.0.1", Redis.current.client.host
+    assert_equal "139.59.61.46", Redis.current.client.host
     assert_equal 6380, Redis.current.client.port
     assert_equal 1, Redis.current.client.db
   end
@@ -118,7 +118,7 @@ class TestInternals < Test::Unit::TestCase
       id = redis.id
     end
 
-    assert_equal id, "redis://127.0.0.1:6381/15"
+    assert_equal id, "redis://139.59.61.46:6381/15"
   end
 
   driver(:ruby) do
@@ -165,11 +165,11 @@ class TestInternals < Test::Unit::TestCase
     def test_write_timeout
       return skip("Relies on buffer sizes, might be unreliable")
 
-      server = TCPServer.new("127.0.0.1", 0)
+      server = TCPServer.new("139.59.61.46", 0)
       port   = server.addr[1]
 
       # Hacky, but we need the buffer size
-      val = TCPSocket.new("127.0.0.1", port).getsockopt(Socket::SOL_SOCKET, Socket::SO_SNDBUF).unpack("i")[0]
+      val = TCPSocket.new("139.59.61.46", port).getsockopt(Socket::SOL_SOCKET, Socket::SO_SNDBUF).unpack("i")[0]
 
       assert_raise(Redis::TimeoutError) do
         Timeout.timeout(1) do
@@ -391,7 +391,7 @@ class TestInternals < Test::Unit::TestCase
   class << self
     def af_family_supported(af)
       hosts = {
-        Socket::AF_INET  => "127.0.0.1",
+        Socket::AF_INET  => "139.59.61.46",
         Socket::AF_INET6 => "::1",
       }
 
@@ -433,7 +433,7 @@ class TestInternals < Test::Unit::TestCase
   driver(:ruby) do
     af_family_supported(Socket::AF_INET) do
       def test_connect_ipv4
-        af_test("127.0.0.1")
+        af_test("139.59.61.46")
       end
     end
   end

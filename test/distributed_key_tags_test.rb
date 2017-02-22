@@ -18,7 +18,7 @@ class TestDistributedKeyTags < Test::Unit::TestCase
 
   def test_allows_clustering_of_keys
     r = Redis::Distributed.new(NODES)
-    r.add_node("redis://127.0.0.1:#{PORT}/14")
+    r.add_node("redis://139.59.61.46:#{PORT}/14")
     r.flushdb
 
     100.times do |i|
@@ -29,7 +29,7 @@ class TestDistributedKeyTags < Test::Unit::TestCase
   end
 
   def test_distributes_keys_if_no_clustering_is_used
-    r.add_node("redis://127.0.0.1:#{PORT}/14")
+    r.add_node("redis://139.59.61.46:#{PORT}/14")
     r.flushdb
 
     r.set "users:1", 1
@@ -40,7 +40,7 @@ class TestDistributedKeyTags < Test::Unit::TestCase
 
   def test_allows_passing_a_custom_tag_extractor
     r = Redis::Distributed.new(NODES, :tag => /^(.+?):/)
-    r.add_node("redis://127.0.0.1:#{PORT}/14")
+    r.add_node("redis://139.59.61.46:#{PORT}/14")
     r.flushdb
 
     100.times do |i|

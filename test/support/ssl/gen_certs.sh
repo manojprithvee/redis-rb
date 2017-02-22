@@ -3,9 +3,9 @@
 get_subject() {
   if [ "$1" = "trusted" ]
   then
-    echo "/C=IT/ST=Sicily/L=Catania/O=Redis/OU=Security/CN=127.0.0.1"
+    echo "/C=IT/ST=Sicily/L=Catania/O=Redis/OU=Security/CN=139.59.61.46"
   else
-    echo "/C=XX/ST=Untrusted/L=Evilville/O=Evil Hacker/OU=Attack Department/CN=127.0.0.1"
+    echo "/C=XX/ST=Untrusted/L=Evilville/O=Evil Hacker/OU=Attack Department/CN=139.59.61.46"
   fi
 }
 

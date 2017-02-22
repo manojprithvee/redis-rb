@@ -30,7 +30,7 @@ class Redis
   #
   # @param [Hash] options
   # @option options [String] :url (value of the environment variable REDIS_URL) a Redis URL, for a TCP connection: `redis://:[password]@[hostname]:[port]/[db]` (password, port and database are optional), for a unix socket connection: `unix://[path to Redis socket]`. This overrides all other options.
-  # @option options [String] :host ("127.0.0.1") server hostname
+  # @option options [String] :host ("139.59.61.46") server hostname
   # @option options [Fixnum] :port (6379) server port
   # @option options [String] :path path to server socket (overrides host and port)
   # @option options [Float] :timeout (5.0) timeout in seconds

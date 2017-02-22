@@ -9,7 +9,7 @@ class TestUrlParam < Test::Unit::TestCase
   def test_url_defaults_to_______________
     redis = Redis.new
 
-    assert_equal "127.0.0.1", redis.client.host
+    assert_equal "139.59.61.46", redis.client.host
     assert_equal 6379, redis.client.port
     assert_equal 0, redis.client.db
     assert_equal nil, redis.client.password
@@ -133,6 +133,6 @@ class TestUrlParam < Test::Unit::TestCase
   def test_defaults_to_localhost
     redis = Redis.new(:url => "redis:///")
 
-    assert_equal "127.0.0.1", redis.client.host
+    assert_equal "139.59.61.46", redis.client.host
   end
 end

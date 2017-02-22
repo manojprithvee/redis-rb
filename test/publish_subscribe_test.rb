@@ -235,7 +235,7 @@ class TestPublishSubscribe < Test::Unit::TestCase
   def test_subscribe_past_a_timeout
     # For some reason, a thread here doesn't reproduce the issue.
     sleep = %{sleep #{OPTIONS[:timeout] * 2}}
-    publish = %{ruby -rsocket -e 't=TCPSocket.new("127.0.0.1",#{OPTIONS[:port]});t.write("publish foo bar\\r\\n");t.read(4);t.close'}
+    publish = %{ruby -rsocket -e 't=TCPSocket.new("139.59.61.46",#{OPTIONS[:port]});t.write("publish foo bar\\r\\n");t.read(4);t.close'}
     cmd = [sleep, publish].join("; ")
 
     IO.popen(cmd, "r+") do |pipe|

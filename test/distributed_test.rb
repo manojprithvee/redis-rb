@@ -26,15 +26,15 @@ class TestDistributed < Test::Unit::TestCase
 
     @r = Redis::Distributed.new NODES, :logger => logger, :timeout => 10
 
-    assert_equal "127.0.0.1", @r.nodes[0].client.host
+    assert_equal "139.59.61.46", @r.nodes[0].client.host
     assert_equal PORT, @r.nodes[0].client.port
     assert_equal 15, @r.nodes[0].client.db
     assert_equal 10, @r.nodes[0].client.timeout
     assert_equal logger, @r.nodes[0].client.logger
 
-    @r.add_node("redis://127.0.0.1:6380/14")
+    @r.add_node("redis://139.59.61.46:6380/14")
 
-    assert_equal "127.0.0.1", @r.nodes[1].client.host
+    assert_equal "139.59.61.46", @r.nodes[1].client.host
     assert_equal 6380, @r.nodes[1].client.port
     assert_equal 14, @r.nodes[1].client.db
     assert_equal 10, @r.nodes[1].client.timeout
