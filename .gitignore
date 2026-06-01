@@ -14,3 +14,5 @@ Gemfile.lock
 /redis/*
 /test/db
 /test/test.conf
+__pycache__/
+*.py[cod]
