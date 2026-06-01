@@ -1,8 +1,24 @@
 """
-Redis RDB file parser supporting RDB versions up to v10 (Redis 7.x).
+Redis RDB file parser supporting RDB versions up to v10 (Redis 7.0).
 
-RDB v10 adds: listpack-encoded sets, hash-listpack, zset-listpack,
-quicklist2 (with listpack nodes), and stream listpacks v3.
+RDB v10 (Redis 7.0) adds on top of v9:
+  HASH_LISTPACK (16), ZSET_LISTPACK (17), LIST_QUICKLIST_2 (18),
+  STREAM_LISTPACKS_2 (19) with first_id / max_deleted_entry_id /
+  entries_added / cgroup entries_read,
+  and the FUNCTION2 / FUNCTION / MODULE_AUX opcodes (245-247).
+
+Type reference (rdb.h, Redis 7.0):
+  0  STRING          9  HASH_ZIPMAP (deprecated)
+  1  LIST           10  LIST_ZIPLIST
+  2  SET            11  SET_INTSET
+  3  ZSET           12  ZSET_ZIPLIST
+  4  HASH           13  HASH_ZIPLIST
+  5  ZSET_2         14  LIST_QUICKLIST
+  6  MODULE         15  STREAM_LISTPACKS
+  7  MODULE_2       16  HASH_LISTPACK
+                    17  ZSET_LISTPACK
+                    18  LIST_QUICKLIST_2
+                    19  STREAM_LISTPACKS_2
 """
 
 import struct
@@ -11,44 +27,52 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
-# Opcodes
+# Opcodes (Redis 7.0 / RDB v10)
 # ---------------------------------------------------------------------------
-RDB_OPCODE_AUX          = 0xFA
-RDB_OPCODE_RESIZEDB     = 0xFB
-RDB_OPCODE_EXPIRETIME_MS = 0xFC
-RDB_OPCODE_EXPIRETIME   = 0xFD
-RDB_OPCODE_SELECTDB     = 0xFE
-RDB_OPCODE_EOF          = 0xFF
+RDB_OPCODE_FUNCTION2     = 245  # serialised Lua function library (v10)
+RDB_OPCODE_FUNCTION      = 246  # RC1/RC2 function library (v10)
+RDB_OPCODE_MODULE_AUX    = 247  # module auxiliary data
+RDB_OPCODE_IDLE          = 248  # LRU idle time for next key
+RDB_OPCODE_FREQ          = 249  # LFU frequency byte for next key
+RDB_OPCODE_AUX           = 250  # 0xFA – auxiliary field (redis-ver, etc.)
+RDB_OPCODE_RESIZEDB      = 251  # 0xFB – hash table resize hint
+RDB_OPCODE_EXPIRETIME_MS = 252  # 0xFC – expiry in ms
+RDB_OPCODE_EXPIRETIME    = 253  # 0xFD – expiry in seconds (legacy)
+RDB_OPCODE_SELECTDB      = 254  # 0xFE – database selector
+RDB_OPCODE_EOF           = 255  # 0xFF – end of file + optional CRC64
 
 # ---------------------------------------------------------------------------
-# Value type constants
+# Value type constants (RDB v10)
 # ---------------------------------------------------------------------------
 RDB_TYPE_STRING             = 0
 RDB_TYPE_LIST               = 1
 RDB_TYPE_SET                = 2
 RDB_TYPE_ZSET               = 3
 RDB_TYPE_HASH               = 4
-RDB_TYPE_ZSET_2             = 5
+RDB_TYPE_ZSET_2             = 5   # binary-encoded double scores
 RDB_TYPE_MODULE             = 6
-RDB_TYPE_MODULE_2           = 7
-RDB_TYPE_HASH_ZIPMAP        = 9   # deprecated, v2
+RDB_TYPE_MODULE_2           = 7   # module with parsing annotations
+RDB_TYPE_HASH_ZIPMAP        = 9   # deprecated since Redis 2.6
 RDB_TYPE_LIST_ZIPLIST       = 10
 RDB_TYPE_SET_INTSET         = 11
 RDB_TYPE_ZSET_ZIPLIST       = 12
 RDB_TYPE_HASH_ZIPLIST       = 13
 RDB_TYPE_LIST_QUICKLIST     = 14
-RDB_TYPE_STREAM_LISTPACKS   = 15
-RDB_TYPE_HASH_LISTPACK      = 16  # v10
-RDB_TYPE_ZSET_LISTPACK      = 17  # v10
-RDB_TYPE_LIST_QUICKLIST_2   = 18  # v10
-RDB_TYPE_SET_LISTPACK       = 19  # v10
-RDB_TYPE_STREAM_LISTPACKS_3 = 20  # v10
+RDB_TYPE_STREAM_LISTPACKS   = 15  # Redis 5.0
+RDB_TYPE_HASH_LISTPACK      = 16  # Redis 7.0 (RDB v10)
+RDB_TYPE_ZSET_LISTPACK      = 17  # Redis 7.0
+RDB_TYPE_LIST_QUICKLIST_2   = 18  # Redis 7.0
+RDB_TYPE_STREAM_LISTPACKS_2 = 19  # Redis 7.0 – extended stream metadata
 
-# Length-encoding special types
-RDB_ENC_INT8    = 0
-RDB_ENC_INT16   = 1
-RDB_ENC_INT32   = 2
-RDB_ENC_LZF     = 3
+# Length-encoding special sub-types (enc_type == 3)
+RDB_ENC_INT8  = 0
+RDB_ENC_INT16 = 1
+RDB_ENC_INT32 = 2
+RDB_ENC_LZF   = 3
+
+# Length-encoding enc_type == 2 first-byte values
+RDB_32BITLEN = 0x80
+RDB_64BITLEN = 0x81
 
 
 # ---------------------------------------------------------------------------
@@ -60,13 +84,16 @@ class RDBEntry:
     key: bytes
     value: Any
     value_type: int
-    expire_ms: Optional[int] = None  # epoch ms, None = no expiry
+    expire_ms: Optional[int] = None   # epoch ms, None = no expiry
+    lru_idle: Optional[int] = None    # LRU idle seconds (IDLE opcode)
+    lfu_freq: Optional[int] = None    # LFU frequency byte (FREQ opcode)
 
 
 @dataclass
 class RDBFile:
     version: int
     aux: Dict[bytes, bytes] = field(default_factory=dict)
+    functions: List[bytes] = field(default_factory=list)  # FUNCTION2 payloads
     entries: List[RDBEntry] = field(default_factory=list)
 
 
@@ -82,7 +109,6 @@ def _lzf_decompress(data: bytes, expected_len: int) -> bytes:
         ctrl = data[ip]
         ip += 1
         if ctrl < 32:
-            # literal run: ctrl+1 bytes
             length = ctrl + 1
             out[op:op + length] = data[ip:ip + length]
             ip += length
@@ -138,31 +164,39 @@ class _Reader:
     def peek_byte(self) -> int:
         return self._buf[self._pos]
 
-    # -- length-prefixed encoding -------------------------------------------
+    # -- length encoding (RDB_6BITLEN / RDB_14BITLEN / RDB_32BITLEN /
+    #                     RDB_64BITLEN / RDB_ENCVAL)
     def read_length(self) -> Tuple[int, bool]:
-        """Returns (length_or_int_value, is_special).
-        is_special=True means the value is an encoded integer type ID,
-        not a byte length.
+        """Return (value, is_special).
+
+        is_special=True  → value is a special-encoding type ID (not a length).
+        is_special=False → value is a plain byte count.
         """
         first = self.read_byte()
         enc_type = (first & 0xC0) >> 6
-        if enc_type == 0:           # 6-bit length
+
+        if enc_type == 0:       # RDB_6BITLEN: 6-bit length
             return first & 0x3F, False
-        elif enc_type == 1:         # 14-bit length
+
+        elif enc_type == 1:     # RDB_14BITLEN: 14-bit length
             second = self.read_byte()
             return ((first & 0x3F) << 8) | second, False
-        elif enc_type == 2:         # 32-bit or 64-bit length
-            # In RDB >=7: big-endian 32-bit
-            raw = self.read(4)
-            return struct.unpack(">I", raw)[0], False
-        else:                       # enc_type == 3 → special encoding
+
+        elif enc_type == 2:     # RDB_32BITLEN or RDB_64BITLEN
+            if first == RDB_32BITLEN:
+                return struct.unpack(">I", self.read(4))[0], False
+            elif first == RDB_64BITLEN:
+                return struct.unpack(">Q", self.read(8))[0], False
+            else:
+                raise ValueError(f"Unknown length-encoding first byte: 0x{first:02X}")
+
+        else:                   # enc_type == 3 → RDB_ENCVAL (special)
             return first & 0x3F, True
 
     def read_string(self) -> bytes:
         length, is_special = self.read_length()
         if not is_special:
             return self.read(length)
-        # Special encodings
         if length == RDB_ENC_INT8:
             return str(struct.unpack("b", self.read(1))[0]).encode()
         elif length == RDB_ENC_INT16:
@@ -172,12 +206,12 @@ class _Reader:
         elif length == RDB_ENC_LZF:
             clen, _ = self.read_length()
             ulen, _ = self.read_length()
-            compressed = self.read(clen)
-            return _decompress_lzf(compressed, ulen)
+            return _decompress_lzf(self.read(clen), ulen)
         else:
             raise ValueError(f"Unknown special string encoding: {length}")
 
     def read_double(self) -> float:
+        """Legacy text-encoded double (RDB_TYPE_ZSET)."""
         length = self.read_byte()
         if length == 253:
             return float("nan")
@@ -188,6 +222,7 @@ class _Reader:
         return float(self.read(length))
 
     def read_double_binary(self) -> float:
+        """Binary double (RDB_TYPE_ZSET_2, IEEE 754 little-endian)."""
         return struct.unpack("<d", self.read(8))[0]
 
     def read_uint16_le(self) -> int:
@@ -201,77 +236,97 @@ class _Reader:
 
 
 # ---------------------------------------------------------------------------
-# Listpack decoder (used by v10 types)
+# Listpack decoder
+# Encoding reference: Redis listpack.c
+#   0xxxxxxx          7-bit uint         (0x00–0x7F)
+#   10xxxxxx          6-bit string       (0x80–0xBF), len = low 6 bits
+#   110xxxxx yyyyyyyy 13-bit signed int  (0xC0–0xDF)
+#   1110xxxx xxxxxxxx 12-bit string      (0xE0–0xEF), len = low 4+8 bits
+#   0xF1              16-bit signed int
+#   0xF2              24-bit signed int
+#   0xF3              32-bit signed int
+#   0xF4              64-bit signed int
+#   0xFF              end marker
+# Each element is followed by a variable-length backlen field (bytes with
+# bit-7 set are continuation; the final byte has bit-7 clear).
 # ---------------------------------------------------------------------------
 def _decode_listpack(data: bytes) -> List[bytes]:
-    """Parse a Redis listpack blob and return its elements as bytes."""
     r = _Reader(data)
     _total_bytes = r.read_uint32_le()
-    num_elements = r.read_uint16_le()
+    _num_elements = r.read_uint16_le()
     result = []
     while r.peek_byte() != 0xFF:
-        element = _lp_read_element(r)
-        result.append(element)
+        result.append(_lp_read_element(r))
     return result
 
 
 def _lp_read_element(r: _Reader) -> bytes:
     first = r.read_byte()
+
     if first & 0x80 == 0:
-        # 7-bit uint: 0xxxxxxx (0x00–0x7F)
-        val = first & 0x7F
+        # 7-bit uint: 0xxxxxxx
         _lp_skip_backlen(r)
-        return str(val).encode()
+        return str(first & 0x7F).encode()
+
     elif first & 0xC0 == 0x80:
-        # 6-bit string: 10xxxxxx (0x80–0xBF), low 6 bits = length
-        slen = first & 0x3F
-        s = r.read(slen)
+        # 6-bit string: 10xxxxxx
+        s = r.read(first & 0x3F)
         _lp_skip_backlen(r)
         return s
+
     elif first & 0xE0 == 0xC0:
-        # 13-bit signed int: 110xxxxx yyyyyyyy (0xC0–0xDF)
-        second = r.read_byte()
-        val = ((first & 0x1F) << 8) | second
+        # 13-bit signed int: 110xxxxx yyyyyyyy
+        val = ((first & 0x1F) << 8) | r.read_byte()
         if val >= 0x1000:
             val -= 0x2000
         _lp_skip_backlen(r)
         return str(val).encode()
+
     elif first & 0xF0 == 0xE0:
-        # 12-bit string: 1110xxxx xxxxxxxx (0xE0–0xEF)
-        slen = ((first & 0x0F) << 8) | r.read_byte()
-        s = r.read(slen)
+        # 12-bit string: 1110xxxx xxxxxxxx
+        s = r.read(((first & 0x0F) << 8) | r.read_byte())
         _lp_skip_backlen(r)
         return s
+
     elif first == 0xF1:
         val = struct.unpack("<h", r.read(2))[0]
         _lp_skip_backlen(r)
         return str(val).encode()
+
     elif first == 0xF2:
         b = r.read(3)
         val = struct.unpack("<i", b + (b'\xff' if b[2] & 0x80 else b'\x00'))[0]
         _lp_skip_backlen(r)
         return str(val).encode()
+
     elif first == 0xF3:
         val = struct.unpack("<i", r.read(4))[0]
         _lp_skip_backlen(r)
         return str(val).encode()
+
     elif first == 0xF4:
         val = struct.unpack("<q", r.read(8))[0]
         _lp_skip_backlen(r)
         return str(val).encode()
+
     else:
         raise ValueError(f"Unknown listpack encoding byte: 0x{first:02X} at pos {r.pos()-1}")
 
 
 def _lp_skip_backlen(r: _Reader) -> None:
-    """Skip the variable-length backlen field at the end of each listpack entry."""
+    """Skip the backlen field that follows each listpack element.
+
+    The backlen encodes the total size of the preceding element (encoding +
+    data bytes, NOT including the backlen itself).  Bytes with bit-7 set
+    indicate continuation; the final byte has bit-7 clear.
+    """
     b = r.read_byte()
     while b & 0x80:
         b = r.read_byte()
 
 
 # ---------------------------------------------------------------------------
-# Ziplist decoder (legacy types)
+# Ziplist decoder (legacy types: LIST_ZIPLIST, HASH_ZIPLIST, ZSET_ZIPLIST)
 # ---------------------------------------------------------------------------
 def _decode_ziplist(data: bytes) -> List[bytes]:
     r = _Reader(data)
@@ -288,35 +343,33 @@ def _decode_ziplist(data: bytes) -> List[bytes]:
 
 
 def _zl_read_entry(r: _Reader) -> Optional[bytes]:
-    prevlen_byte = r.read_byte()
-    if prevlen_byte == 0xFF:
+    prevlen = r.read_byte()
+    if prevlen == 0xFF:
         return None
-    if prevlen_byte == 0xFE:
-        r.read(4)  # 5-byte prevlen
+    if prevlen == 0xFE:
+        r.read(4)  # 5-byte prevlen: already read first byte, skip 4 more
 
     encoding = r.read_byte()
-    if encoding >> 6 == 0:         # 6-bit string
-        slen = encoding & 0x3F
-        return r.read(slen)
-    elif encoding >> 6 == 1:       # 14-bit string
-        slen = ((encoding & 0x3F) << 8) | r.read_byte()
-        return r.read(slen)
-    elif encoding >> 6 == 2:       # 32-bit string
-        slen = struct.unpack(">I", r.read(4))[0]
-        return r.read(slen)
-    elif encoding == 0xC0:
+    enc_hi = encoding >> 6
+
+    if enc_hi == 0:                 # 6-bit string
+        return r.read(encoding & 0x3F)
+    elif enc_hi == 1:               # 14-bit string
+        return r.read(((encoding & 0x3F) << 8) | r.read_byte())
+    elif enc_hi == 2:               # 32-bit string
+        return r.read(struct.unpack(">I", r.read(4))[0])
+    elif encoding == 0xC0:          # int16
         return str(struct.unpack("<h", r.read(2))[0]).encode()
-    elif encoding == 0xD0:
+    elif encoding == 0xD0:          # int32
         return str(struct.unpack("<i", r.read(4))[0]).encode()
-    elif encoding == 0xE0:
+    elif encoding == 0xE0:          # int64
         return str(struct.unpack("<q", r.read(8))[0]).encode()
-    elif encoding == 0xF0:
+    elif encoding == 0xF0:          # int24
         b = r.read(3)
-        val = struct.unpack("<i", b + b'\x00')[0]
-        return str(val).encode()
-    elif encoding == 0xFE:
+        return str(struct.unpack("<i", b + b'\x00')[0]).encode()
+    elif encoding == 0xFE:          # int8
         return str(struct.unpack("b", r.read(1))[0]).encode()
-    elif encoding >= 0xF1 and encoding <= 0xFD:
+    elif 0xF1 <= encoding <= 0xFD:  # 4-bit uint (0–12)
         return str(encoding - 0xF1).encode()
     return None
 
@@ -326,15 +379,11 @@ def _zl_read_entry(r: _Reader) -> Optional[bytes]:
 # ---------------------------------------------------------------------------
 def _decode_intset(data: bytes) -> List[bytes]:
     r = _Reader(data)
-    encoding = r.read_uint32_le()
+    encoding = r.read_uint32_le()           # 2, 4, or 8
     length   = r.read_uint32_le()
-    fmt = {2: "<h", 4: "<i", 8: "<q"}[encoding]
-    size = encoding
-    result = []
-    for _ in range(length):
-        val = struct.unpack(fmt, r.read(size))[0]
-        result.append(str(val).encode())
-    return result
+    fmt      = {2: "<h", 4: "<i", 8: "<q"}[encoding]
+    return [str(struct.unpack(fmt, r.read(encoding))[0]).encode()
+            for _ in range(length)]
 
 
 # ---------------------------------------------------------------------------
@@ -345,38 +394,28 @@ def _parse_string(r: _Reader) -> bytes:
 
 
 def _parse_list(r: _Reader) -> List[bytes]:
-    length, _ = r.read_length()
-    return [r.read_string() for _ in range(length)]
+    n, _ = r.read_length()
+    return [r.read_string() for _ in range(n)]
 
 
 def _parse_set(r: _Reader) -> List[bytes]:
-    length, _ = r.read_length()
-    return [r.read_string() for _ in range(length)]
+    n, _ = r.read_length()
+    return [r.read_string() for _ in range(n)]
 
 
 def _parse_zset(r: _Reader) -> List[Tuple[bytes, float]]:
-    length, _ = r.read_length()
-    result = []
-    for _ in range(length):
-        member = r.read_string()
-        score  = r.read_double()
-        result.append((member, score))
-    return result
+    n, _ = r.read_length()
+    return [(r.read_string(), r.read_double()) for _ in range(n)]
 
 
 def _parse_zset2(r: _Reader) -> List[Tuple[bytes, float]]:
-    length, _ = r.read_length()
-    result = []
-    for _ in range(length):
-        member = r.read_string()
-        score  = r.read_double_binary()
-        result.append((member, score))
-    return result
+    n, _ = r.read_length()
+    return [(r.read_string(), r.read_double_binary()) for _ in range(n)]
 
 
 def _parse_hash(r: _Reader) -> Dict[bytes, bytes]:
-    length, _ = r.read_length()
-    return {r.read_string(): r.read_string() for _ in range(length)}
+    n, _ = r.read_length()
+    return {r.read_string(): r.read_string() for _ in range(n)}
 
 
 def _parse_list_ziplist(r: _Reader) -> List[bytes]:
@@ -388,129 +427,169 @@ def _parse_set_intset(r: _Reader) -> List[bytes]:
 
 
 def _parse_zset_ziplist(r: _Reader) -> List[Tuple[bytes, float]]:
-    elements = _decode_ziplist(r.read_string())
-    return [(elements[i], float(elements[i + 1])) for i in range(0, len(elements), 2)]
+    elems = _decode_ziplist(r.read_string())
+    return [(elems[i], float(elems[i + 1])) for i in range(0, len(elems), 2)]
 
 
 def _parse_hash_ziplist(r: _Reader) -> Dict[bytes, bytes]:
-    elements = _decode_ziplist(r.read_string())
-    return {elements[i]: elements[i + 1] for i in range(0, len(elements), 2)}
+    elems = _decode_ziplist(r.read_string())
+    return {elems[i]: elems[i + 1] for i in range(0, len(elems), 2)}
 
 
 def _parse_list_quicklist(r: _Reader) -> List[bytes]:
-    num_nodes, _ = r.read_length()
+    n, _ = r.read_length()
     result = []
-    for _ in range(num_nodes):
+    for _ in range(n):
         result.extend(_decode_ziplist(r.read_string()))
     return result
 
 
 def _parse_list_quicklist2(r: _Reader) -> List[bytes]:
-    """Quicklist v2: nodes can be ziplist or listpack."""
-    num_nodes, _ = r.read_length()
+    """Quicklist v2 (RDB v10): each node carries a container type.
+    container=1  plain bytes node
+    container=2  listpack node
+    """
+    n, _ = r.read_length()
     result = []
-    for _ in range(num_nodes):
+    for _ in range(n):
         data = r.read_string()
-        container, _ = r.read_length()  # 1=plain, 2=ziplist/listpack
+        container, _ = r.read_length()
         if container == 2:
-            # Redis 7.x uses listpack nodes
-            try:
-                result.extend(_decode_listpack(data))
-            except Exception:
-                result.extend(_decode_ziplist(data))
+            result.extend(_decode_listpack(data))
         else:
             result.append(data)
     return result
 
 
 def _parse_hash_listpack(r: _Reader) -> Dict[bytes, bytes]:
-    elements = _decode_listpack(r.read_string())
-    return {elements[i]: elements[i + 1] for i in range(0, len(elements), 2)}
+    elems = _decode_listpack(r.read_string())
+    return {elems[i]: elems[i + 1] for i in range(0, len(elems), 2)}
 
 
 def _parse_zset_listpack(r: _Reader) -> List[Tuple[bytes, float]]:
-    elements = _decode_listpack(r.read_string())
-    return [(elements[i], float(elements[i + 1])) for i in range(0, len(elements), 2)]
-
-
-def _parse_set_listpack(r: _Reader) -> List[bytes]:
-    return _decode_listpack(r.read_string())
-
-
-def _parse_stream_listpacks(r: _Reader) -> Dict:
-    """Parse stream type (v15). Returns a dict with raw structure."""
-    num_listpacks, _ = r.read_length()
-    listpacks = []
-    for _ in range(num_listpacks):
-        master_id = r.read_string()  # master entry ID
-        lp_data   = r.read_string()  # listpack blob
-        listpacks.append({"master_id": master_id, "data": lp_data})
-
-    length, _       = r.read_length()
-    last_ms         = r.read_uint64_le()
-    last_seq        = r.read_uint64_le()
-    first_ms        = r.read_uint64_le()
-    first_seq       = r.read_uint64_le()
-    max_del_ms      = r.read_uint64_le()
-    max_del_seq     = r.read_uint64_le()
-    entries_added, _ = r.read_length()
-
-    num_cgroups, _ = r.read_length()
-    cgroups = []
-    for _ in range(num_cgroups):
-        cg_name   = r.read_string()
-        last_del_ms  = r.read_uint64_le()
-        last_del_seq = r.read_uint64_le()
-        entries_read, _ = r.read_length()
-
-        num_pel, _ = r.read_length()
-        pel = []
-        for _ in range(num_pel):
-            eid = r.read(16)
-            ts  = r.read_uint64_le()
-            dc  = r.read_uint64_le()
-            count, _ = r.read_length()
-            pel.append({"id": eid, "ts": ts, "delivery_count": count})
-
-        num_consumers, _ = r.read_length()
-        consumers = []
-        for _ in range(num_consumers):
-            cname = r.read_string()
-            seen  = r.read_uint64_le()
-            active = r.read_uint64_le()
-            num_cpel, _ = r.read_length()
-            cpel_ids = [r.read(16) for _ in range(num_cpel)]
-            consumers.append({"name": cname, "seen_time": seen, "pel_ids": cpel_ids})
-
-        cgroups.append({
-            "name": cg_name,
-            "pel": pel,
-            "consumers": consumers,
-        })
-
-    return {
-        "listpacks": listpacks,
-        "length": length,
-        "last_id": (last_ms, last_seq),
-        "first_id": (first_ms, first_seq),
-        "cgroups": cgroups,
-    }
-
-
-def _parse_stream_listpacks3(r: _Reader) -> Dict:
-    """Stream v3 (RDB type 20, Redis 7.4+). Extended stream metadata."""
-    return _parse_stream_listpacks(r)
-
-
-def _parse_module(r: _Reader) -> bytes:
-    """Skip/collect unknown module data."""
-    r.read_string()  # module name
-    length, _ = r.read_length()
-    return r.read(length)
+    elems = _decode_listpack(r.read_string())
+    return [(elems[i], float(elems[i + 1])) for i in range(0, len(elems), 2)]
 
 
 # ---------------------------------------------------------------------------
-# Main parser
+# Stream parsers
+# ---------------------------------------------------------------------------
+def _read_stream_cgroups(r: _Reader, is_v2: bool) -> List[Dict]:
+    """Read consumer groups shared by both stream type 15 and type 19."""
+    num_cgroups, _ = r.read_length()
+    cgroups = []
+    for _ in range(num_cgroups):
+        cg_name = r.read_string()
+
+        # Consumer group last-delivered ID – both ms and seq are length-encoded
+        cg_last_ms,  _ = r.read_length()
+        cg_last_seq, _ = r.read_length()
+
+        # entries_read only present in STREAM_LISTPACKS_2 (type 19)
+        entries_read = None
+        if is_v2:
+            entries_read, _ = r.read_length()
+
+        # Global PEL
+        num_pel, _ = r.read_length()
+        pel = []
+        for _ in range(num_pel):
+            raw_id        = r.read(16)           # streamID: ms(8) + seq(8) raw LE
+            delivery_time = r.read_uint64_le()   # rdbLoadMillisecondTime → raw LE
+            delivery_count, _ = r.read_length()  # rdbLoadLen → length-encoded
+            pel.append({
+                "id": raw_id,
+                "delivery_time": delivery_time,
+                "delivery_count": delivery_count,
+            })
+
+        # Consumers
+        num_consumers, _ = r.read_length()
+        consumers = []
+        for _ in range(num_consumers):
+            name      = r.read_string()
+            seen_time = r.read_uint64_le()       # rdbLoadMillisecondTime → raw LE
+            # active_time only in STREAM_LISTPACKS_3 (type 21, RDB v11) – not v10
+            cpel_count, _ = r.read_length()
+            cpel_ids = [r.read(16) for _ in range(cpel_count)]
+            consumers.append({
+                "name":      name,
+                "seen_time": seen_time,
+                "pel_ids":   cpel_ids,
+            })
+
+        cgroups.append({
+            "name":         cg_name,
+            "last_id":      (cg_last_ms, cg_last_seq),
+            "entries_read": entries_read,
+            "pel":          pel,
+            "consumers":    consumers,
+        })
+    return cgroups
+
+
+def _parse_stream_listpacks(r: _Reader) -> Dict:
+    """RDB_TYPE_STREAM_LISTPACKS (15) – Redis 5.0."""
+    num_lp, _ = r.read_length()
+    listpacks = []
+    for _ in range(num_lp):
+        master_id = r.read_string()   # raw streamID bytes (16 bytes as string)
+        lp_data   = r.read_string()
+        listpacks.append({"master_id": master_id, "data": lp_data})
+
+    # All stream metadata is length-encoded (rdbSaveLen / rdbLoadLen)
+    length,   _ = r.read_length()
+    last_ms,  _ = r.read_length()
+    last_seq, _ = r.read_length()
+    # first_id / max_deleted_entry_id / entries_added only in type 19
+
+    cgroups = _read_stream_cgroups(r, is_v2=False)
+
+    return {
+        "listpacks": listpacks,
+        "length":    length,
+        "last_id":   (last_ms, last_seq),
+        "cgroups":   cgroups,
+    }
+
+
+def _parse_stream_listpacks2(r: _Reader) -> Dict:
+    """RDB_TYPE_STREAM_LISTPACKS_2 (19) – Redis 7.0 (RDB v10).
+
+    Extends type 15 with first_id, max_deleted_entry_id, entries_added,
+    and per-consumer-group entries_read.
+    """
+    num_lp, _ = r.read_length()
+    listpacks = []
+    for _ in range(num_lp):
+        master_id = r.read_string()
+        lp_data   = r.read_string()
+        listpacks.append({"master_id": master_id, "data": lp_data})
+
+    length,       _ = r.read_length()
+    last_ms,      _ = r.read_length()
+    last_seq,     _ = r.read_length()
+    first_ms,     _ = r.read_length()
+    first_seq,    _ = r.read_length()
+    max_del_ms,   _ = r.read_length()
+    max_del_seq,  _ = r.read_length()
+    entries_added, _ = r.read_length()
+
+    cgroups = _read_stream_cgroups(r, is_v2=True)
+
+    return {
+        "listpacks":               listpacks,
+        "length":                  length,
+        "last_id":                 (last_ms, last_seq),
+        "first_id":                (first_ms, first_seq),
+        "max_deleted_entry_id":    (max_del_ms, max_del_seq),
+        "entries_added":           entries_added,
+        "cgroups":                 cgroups,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Main type dispatch table
 # ---------------------------------------------------------------------------
 _TYPE_PARSERS = {
     RDB_TYPE_STRING:             _parse_string,
@@ -527,14 +606,16 @@ _TYPE_PARSERS = {
     RDB_TYPE_LIST_QUICKLIST_2:   _parse_list_quicklist2,
     RDB_TYPE_HASH_LISTPACK:      _parse_hash_listpack,
     RDB_TYPE_ZSET_LISTPACK:      _parse_zset_listpack,
-    RDB_TYPE_SET_LISTPACK:       _parse_set_listpack,
     RDB_TYPE_STREAM_LISTPACKS:   _parse_stream_listpacks,
-    RDB_TYPE_STREAM_LISTPACKS_3: _parse_stream_listpacks3,
+    RDB_TYPE_STREAM_LISTPACKS_2: _parse_stream_listpacks2,
 }
 
 
+# ---------------------------------------------------------------------------
+# Top-level parser
+# ---------------------------------------------------------------------------
 def parse_rdb(data: bytes) -> RDBFile:
-    """Parse a full RDB file from bytes and return an RDBFile object."""
+    """Parse a complete RDB dump from *data* and return an :class:`RDBFile`."""
     r = _Reader(data)
 
     magic = r.read(5)
@@ -546,26 +627,27 @@ def parse_rdb(data: bytes) -> RDBFile:
         raise ValueError(f"Unsupported RDB version: {version} (max supported: 10)")
 
     rdb = RDBFile(version=version)
-    current_db    = 0
+    current_db = 0
     expire_ms: Optional[int] = None
+    lru_idle:  Optional[int] = None
+    lfu_freq:  Optional[int] = None
 
     while True:
         opcode = r.read_byte()
 
         if opcode == RDB_OPCODE_EOF:
-            # Optional 8-byte CRC64 checksum
             if r.remaining() >= 8:
-                _checksum = r.read(8)
+                _checksum = r.read(8)   # CRC64; verification left to caller
             break
 
         elif opcode == RDB_OPCODE_AUX:
-            key   = r.read_string()
-            value = r.read_string()
-            rdb.aux[key] = value
+            k = r.read_string()
+            v = r.read_string()
+            rdb.aux[k] = v
 
         elif opcode == RDB_OPCODE_RESIZEDB:
-            _db_size, _   = r.read_length()
-            _expire_size, _ = r.read_length()
+            r.read_length()   # db_size
+            r.read_length()   # expires_size
 
         elif opcode == RDB_OPCODE_SELECTDB:
             current_db, _ = r.read_length()
@@ -576,8 +658,30 @@ def parse_rdb(data: bytes) -> RDBFile:
         elif opcode == RDB_OPCODE_EXPIRETIME:
             expire_ms = struct.unpack("<I", r.read(4))[0] * 1000
 
+        elif opcode == RDB_OPCODE_IDLE:
+            # LRU idle time (seconds) for the immediately following key
+            lru_idle, _ = r.read_length()
+
+        elif opcode == RDB_OPCODE_FREQ:
+            # LFU frequency byte for the immediately following key
+            lfu_freq = r.read_byte()
+
+        elif opcode in (RDB_OPCODE_FUNCTION2, RDB_OPCODE_FUNCTION):
+            # Serialised Lua function library – store the payload blob
+            rdb.functions.append(r.read_string())
+
+        elif opcode == RDB_OPCODE_MODULE_AUX:
+            # Module auxiliary data – module ID + opaque payload.
+            # Without the module's own type handler we cannot safely skip
+            # an arbitrary amount of data, so we raise rather than silently
+            # mis-parse the rest of the file.
+            raise ValueError(
+                "RDB_OPCODE_MODULE_AUX encountered: module auxiliary data "
+                "cannot be parsed without the module's type handler"
+            )
+
         else:
-            # opcode is actually the value type byte
+            # opcode is the value-type byte
             value_type = opcode
             key = r.read_string()
 
@@ -594,8 +698,12 @@ def parse_rdb(data: bytes) -> RDBFile:
                 value=value,
                 value_type=value_type,
                 expire_ms=expire_ms,
+                lru_idle=lru_idle,
+                lfu_freq=lfu_freq,
             ))
-            expire_ms = None  # reset after consuming
+            expire_ms = None
+            lru_idle  = None
+            lfu_freq  = None
 
     return rdb
 
@@ -607,9 +715,5 @@ def parse_rdb_file(path: str) -> RDBFile:
 
 
 def iter_entries(path: str) -> Iterator[RDBEntry]:
-    """Lazily iterate over RDB entries without loading all into memory.
-    NOTE: Current implementation loads the file once; true streaming would
-    require a stateful reader passed entry-by-entry.
-    """
-    rdb = parse_rdb_file(path)
-    yield from rdb.entries
+    """Iterate over all :class:`RDBEntry` objects in an RDB file."""
+    yield from parse_rdb_file(path).entries
